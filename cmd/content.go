@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"context"
 	"encoding/base64"
 	"fmt"
 
@@ -26,37 +25,39 @@ var contentCmd = &cobra.Command{
 
 func init() {
 	contentCmd.PersistentFlags().Bool("create-branch", true, "create missing target branch")
-	viper.BindPFlag("create-branch", contentCmd.PersistentFlags().Lookup("create-branch"))
-	viper.BindEnv("create-branch", "GHUP_CREATE_BRANCH")
+	_ = viper.BindPFlag("create-branch", contentCmd.PersistentFlags().Lookup("create-branch"))
+	_ = viper.BindEnv("create-branch", "GHUP_CREATE_BRANCH")
 
 	contentCmd.PersistentFlags().String("pr-title", "", "create pull request iff target branch is created and title is specified")
-	viper.BindPFlag("pr-title", contentCmd.PersistentFlags().Lookup("pr-title"))
-	viper.BindEnv("pr-title", "GHUP_PR_TITLE")
+	_ = viper.BindPFlag("pr-title", contentCmd.PersistentFlags().Lookup("pr-title"))
+	_ = viper.BindEnv("pr-title", "GHUP_PR_TITLE")
 
 	contentCmd.PersistentFlags().Bool("pr-draft", false, "create pull request in draft mode")
-	viper.BindPFlag("pr-draft", contentCmd.PersistentFlags().Lookup("pr-draft"))
-	viper.BindEnv("pr-draft", "GHUP_PR_DRAFT")
+	_ = viper.BindPFlag("pr-draft", contentCmd.PersistentFlags().Lookup("pr-draft"))
+	_ = viper.BindEnv("pr-draft", "GHUP_PR_DRAFT")
 
 	contentCmd.PersistentFlags().String("base-branch", "", `base branch name (default: "[remote-default-branch])"`)
-	viper.BindPFlag("base-branch", contentCmd.PersistentFlags().Lookup("base-branch"))
-	viper.BindEnv("base-branch", "GHUP_BASE_BRANCH")
+	_ = viper.BindPFlag("base-branch", contentCmd.PersistentFlags().Lookup("base-branch"))
+	_ = viper.BindEnv("base-branch", "GHUP_BASE_BRANCH")
 
 	contentCmd.Flags().StringP("separator", "s", ":", "file-spec separator")
-	viper.BindPFlag("separator", contentCmd.Flags().Lookup("separator"))
+	_ = viper.BindPFlag("separator", contentCmd.Flags().Lookup("separator"))
 
 	contentCmd.Flags().StringSliceP("update", "u", []string{}, "file-spec to update")
-	viper.BindPFlag("update", contentCmd.Flags().Lookup("update"))
+	_ = viper.BindPFlag("update", contentCmd.Flags().Lookup("update"))
 
 	contentCmd.Flags().StringSliceP("delete", "d", []string{}, "file-path to delete")
-	viper.BindPFlag("delete", contentCmd.Flags().Lookup("delete"))
+	_ = viper.BindPFlag("delete", contentCmd.Flags().Lookup("delete"))
+
+	contentCmd.Flags().StringSliceP("labels", "l", []string{}, "if specified, the provided labels will be added to the pull request")
+	_ = viper.BindPFlag("labels", contentCmd.Flags().Lookup("labels"))
 
 	rootCmd.AddCommand(contentCmd)
 }
 
 func runContentCmd(cmd *cobra.Command, args []string) (err error) {
-	ctx := context.Background()
-
-	client, err := remote.NewTokenClient(ctx, viper.GetString("token"))
+	var output string
+	client, err := remote.NewTokenClient(cmd.Context(), viper.GetString("token"))
 	if err != nil {
 		return errors.Wrap(err, "NewTokenClient")
 	}
@@ -77,7 +78,6 @@ func runContentCmd(cmd *cobra.Command, args []string) (err error) {
 
 	targetOid := repoInfo.TargetBranch.Commit
 	baseBranch := viper.GetString("base-branch")
-	newBranch := false
 
 	if targetOid == "" {
 		if !viper.GetBool("create-branch") {
@@ -101,40 +101,39 @@ func runContentCmd(cmd *cobra.Command, args []string) (err error) {
 			Oid:          targetOid,
 		}
 		log.Debugf("CreateRefInput: %+v", createRefInput)
-		if err := client.CreateRefV4(createRefInput); err != nil {
+		if err = client.CreateRefV4(createRefInput); err != nil {
 			return errors.Wrap(err, "CreateRefV4")
 		}
-		newBranch = true
 	}
 
 	updateFiles := append(args, viper.GetStringSlice("update")...)
 	deleteFiles := viper.GetStringSlice("delete")
 
-	additions := []githubv4.FileAddition{}
-	deletions := []githubv4.FileDeletion{}
+	var additions []githubv4.FileAddition
+	var deletions []githubv4.FileDeletion
 
 	for _, arg := range updateFiles {
 		target, content, err := local.GetLocalFileContent(arg, separator)
 		if err != nil {
 			return errors.Wrapf(err, "GetLocalFileContent(%s, %s)", arg, separator)
 		}
-		local_hash := plumbing.ComputeHash(plumbing.BlobObject, content).String()
-		remote_hash := client.GetFileHashV4(owner, repo, branch, target)
-		log.Infof("local: %s, remote: %s", local_hash, remote_hash)
-		if local_hash != remote_hash || force {
+		localHash := plumbing.ComputeHash(plumbing.BlobObject, content).String()
+		remoteHash := client.GetFileHashV4(owner, repo, branch, target)
+		log.Infof("local: %s, remote: %s", localHash, remoteHash)
+		if localHash != remoteHash || force {
 			log.Infof("%q queued for addition", target)
 			additions = append(additions, githubv4.FileAddition{
 				Path:     githubv4.String(target),
 				Contents: githubv4.Base64String(base64.StdEncoding.EncodeToString(content)),
 			})
 		} else {
-			log.Infof("%q (%s) on target branch: skipping addition", target, remote_hash)
+			log.Infof("%q (%s) on target branch: skipping addition", target, remoteHash)
 		}
 	}
 
 	for _, target := range deleteFiles {
-		remote_hash := client.GetFileHashV4(owner, repo, branch, target)
-		if remote_hash != "" || force {
+		remoteHash := client.GetFileHashV4(owner, repo, branch, target)
+		if remoteHash != "" || force {
 			log.Infof("%q queued for deletion", target)
 			deletions = append(deletions, githubv4.FileDeletion{
 				Path: githubv4.String(target),
@@ -144,34 +143,39 @@ func runContentCmd(cmd *cobra.Command, args []string) (err error) {
 		}
 	}
 
+	foundChanges := true
 	if len(additions) == 0 && len(deletions) == 0 {
-		log.Warn("nothing to do")
-		return nil
+		log.Warn("no changes were detected. skipping commit")
+		foundChanges = false
 	}
 
-	changes := githubv4.FileChanges{
-		Additions: &additions,
-		Deletions: &deletions,
+	if foundChanges {
+		changes := githubv4.FileChanges{
+			Additions: &additions,
+			Deletions: &deletions,
+		}
+		log.Debugf("Additions: %+v", additions)
+		log.Debugf("Deletions: %+v", deletions)
+
+		message = util.BuildCommitMessage()
+
+		log.Infof("committing to owner: %q, repo: %q, branch: %q", owner, repo, branch)
+		log.Infof("commit message: %q", message)
+		input := githubv4.CreateCommitOnBranchInput{
+			Branch:          remote.CommittableBranch(owner, repo, branch),
+			Message:         remote.CommitMessage(message),
+			ExpectedHeadOid: targetOid,
+			FileChanges:     &changes,
+		}
+		log.Debugf("CreateCommitOnBranchInput: %+v", input)
+
+		_, output, err = client.CommitOnBranchV4(input)
+		if err != nil {
+			return errors.Wrap(err, "CommitOnBranchV4")
+		}
 	}
-	log.Debugf("Additions: %+v", additions)
-	log.Debugf("Deletions: %+v", deletions)
 
-	message = util.BuildCommitMessage()
-
-	input := githubv4.CreateCommitOnBranchInput{
-		Branch:          remote.CommittableBranch(owner, repo, branch),
-		Message:         remote.CommitMessage(message),
-		ExpectedHeadOid: targetOid,
-		FileChanges:     &changes,
-	}
-	log.Debugf("CreateCommitOnBranchInput: %+v", input)
-
-	_, commitUrl, err := client.CommitOnBranchV4(input)
-	if err != nil {
-		return errors.Wrap(err, "CommitOnBranchV4")
-	}
-
-	if title := viper.GetString("pr-title"); newBranch && title != "" {
+	if title := viper.GetString("pr-title"); title != "" {
 		log.Infof("opening pull request from %q to %q", branch, baseBranch)
 		input := githubv4.CreatePullRequestInput{
 			RepositoryID: repoInfo.NodeID,
@@ -185,9 +189,9 @@ func runContentCmd(cmd *cobra.Command, args []string) (err error) {
 		if err != nil {
 			return errors.Wrap(err, "CreatePullRequestV4")
 		}
-		fmt.Println(pullRequestUrl)
-	} else {
-		fmt.Println(commitUrl)
+		output = pullRequestUrl
 	}
+
+	fmt.Println(output)
 	return
 }
